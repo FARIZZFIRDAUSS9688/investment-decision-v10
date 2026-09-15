@@ -9,9 +9,11 @@ def post(payload):
         API_BASE+"/api/ingest",
         data=data,
         headers={
-            "content-type":"application/json",
-            "authorization":"Bearer "+INGEST_TOKEN
-        },
+    "content-type":"application/json",
+    "authorization":"Bearer "+TOKEN,
+    "User-Agent":"Mozilla/5.0 V10-Investment-Scanner/1.0",
+    "Accept":"application/json"
+},
         method="POST"
     )
     with urllib.request.urlopen(req,timeout=45) as r:
