@@ -1,0 +1,23 @@
+name: V10 Private Heavy Validation Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run private scanner
+        env:
+          API_BASE: ${{ secrets.API_BASE }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+        run: python scanner/run.py
