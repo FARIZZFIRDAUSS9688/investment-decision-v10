@@ -1,0 +1,18 @@
+{
+  "notes": [
+    "Starter test symbols only; not recommendations.",
+    "MY uses .KL, HK uses .HK, US uses plain ticker.",
+    "Low-price MY symbols are blocked from actionable BUY if execution data is incomplete."
+  ],
+  "symbols": [
+    {"market":"MY","symbol":"1155.KL","name":"Maybank","currency":"MYR"},
+    {"market":"MY","symbol":"1023.KL","name":"CIMB","currency":"MYR"},
+    {"market":"MY","symbol":"5347.KL","name":"Tenaga Nasional","currency":"MYR"},
+    {"market":"US","symbol":"AAPL","name":"Apple","currency":"USD"},
+    {"market":"US","symbol":"MSFT","name":"Microsoft","currency":"USD"},
+    {"market":"US","symbol":"NVDA","name":"NVIDIA","currency":"USD"},
+    {"market":"HK","symbol":"0700.HK","name":"Tencent","currency":"HKD"},
+    {"market":"HK","symbol":"9988.HK","name":"Alibaba","currency":"HKD"},
+    {"market":"HK","symbol":"3690.HK","name":"Meituan","currency":"HKD"}
+  ]
+}
