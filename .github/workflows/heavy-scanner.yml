@@ -1,4 +1,4 @@
-name: V10.7 Auto Discovery + Position Manager
+name: V10.7C Shariah Only + Auto Discovery
 
 on:
   workflow_dispatch:
@@ -21,7 +21,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run V10.7 scanner
+      - name: Install PDF reader
+        run: pip install pypdf
+
+      - name: Run V10.7C scanner
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
