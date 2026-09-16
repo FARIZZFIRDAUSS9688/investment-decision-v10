@@ -1,5 +1,6 @@
-import os, json, math, statistics, datetime, urllib.request, urllib.parse, urllib.error
+import os, json, math, statistics, datetime, urllib.request, urllib.parse, urllib.error, io, re
 from pathlib import Path
+from pypdf import PdfReader
 
 ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
 DATABASE_ID = os.environ["CF_D1_DATABASE_ID"]
@@ -11,6 +12,33 @@ SOURCE = "YAHOO_PUBLIC_CHART_UNOFFICIAL"
 DISCOVERY_ENABLED = True
 DISCOVERY_PER_MARKET = 20
 DISCOVERY_PICK_PER_MARKET = 8
+
+SHARIAH_ONLY = True
+
+# Official Securities Commission Malaysia / SAC list effective 29 May 2026.
+SC_MY_SHARIAH_PDF = "https://www.sc.com.my/api/documentms/download.ashx?id=9f03c706-607f-4fbe-b4c7-91afc352ee49"
+SC_MY_SHARIAH_ASOF = "2026-05-29"
+
+# Conservative verified allowlists from official S&P Shariah index pages
+# as of 31 Aug 2026. Unknown symbols are hidden (fail-closed).
+GLOBAL_SHARIAH_ASOF = "2026-08-31"
+
+US_SHARIAH_VERIFIED = {
+    "NVDA","AAPL","MSFT","AMZN","GOOGL","GOOG","AVGO","META","MU","TSLA"
+}
+
+HK_SHARIAH_VERIFIED = {
+    "9988.HK",   # Alibaba 09988
+    "1810.HK",   # Xiaomi 01810
+    "3690.HK",   # Meituan 03690
+    "1211.HK",   # BYD 01211
+    "9618.HK",   # JD.com 09618
+    "9961.HK",   # Trip.com 09961
+    "6160.HK",   # BeOne Medicines 06160
+    "2269.HK",   # Wuxi Biologics 02269
+    "1088.HK"    # China Shenhua 01088
+}
+
 
 
 def now_iso():
@@ -109,6 +137,91 @@ def discover_candidates():
         if errors:
             notes.append(f"{market}_err:{','.join(errors[:2])}")
 
+    return out, notes
+
+
+def load_sc_my_shariah():
+    """
+    Read the official SC/SAC May 2026 PDF and extract Main + ACE stock codes.
+    Fail closed if the official file cannot be parsed reliably.
+    """
+    req = urllib.request.Request(
+        SC_MY_SHARIAH_PDF,
+        headers={"User-Agent": UA, "Accept": "application/pdf,*/*"}
+    )
+    with urllib.request.urlopen(req, timeout=45) as r:
+        pdf_bytes = r.read()
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    text = "\n".join((p.extract_text() or "") for p in reader.pages)
+
+    # Exclude LEAP section (not part of the normal retail universe here).
+    if "LEAP MARKET" in text:
+        text = text.split("LEAP MARKET", 1)[0]
+
+    # Tables are formatted as: No.  Stock code  Name.
+    codes = set(
+        m.group(1).zfill(4) + ".KL"
+        for m in re.finditer(r"(?m)^\s*\d+\.?\s+(\d{4,5})\s+", text)
+    )
+
+    # Reliability guard: the official list should contain hundreds of Main/ACE stocks.
+    if len(codes) < 100:
+        raise RuntimeError(f"SC Shariah PDF parse too small: {len(codes)}")
+
+    return codes
+
+def shariah_filter(items):
+    if not SHARIAH_ONLY:
+        return items, ["Shariah filter disabled"]
+
+    notes = []
+    try:
+        my_codes = load_sc_my_shariah()
+        notes.append(f"MY_verified:{len(my_codes)}")
+    except Exception as e:
+        # Fail closed: no Malaysian stock is allowed if official list cannot be verified.
+        my_codes = set()
+        notes.append(f"MY_SC_FAIL:{type(e).__name__}")
+
+    out = []
+    hidden = {"MY":0,"US":0,"HK":0,"OTHER":0}
+
+    for item in items:
+        market = str(item.get("market") or "").upper()
+        symbol = str(item.get("symbol") or "").upper()
+
+        verified = False
+        source = ""
+        asof = ""
+
+        if market == "MY":
+            verified = symbol in my_codes
+            source = "SC Malaysia SAC"
+            asof = SC_MY_SHARIAH_ASOF
+        elif market == "US":
+            verified = symbol in US_SHARIAH_VERIFIED
+            source = "S&P Shariah"
+            asof = GLOBAL_SHARIAH_ASOF
+        elif market == "HK":
+            verified = symbol in HK_SHARIAH_VERIFIED
+            source = "S&P China LargeMidCap Shariah"
+            asof = GLOBAL_SHARIAH_ASOF
+        else:
+            verified = False
+
+        if verified:
+            x = dict(item)
+            x["shariah_verified"] = True
+            x["shariah_source"] = source
+            x["shariah_asof"] = asof
+            out.append(x)
+        else:
+            hidden[market if market in hidden else "OTHER"] += 1
+
+    notes.append(
+        "hidden=" + ",".join(f"{k}:{v}" for k,v in hidden.items())
+    )
     return out, notes
 
 def chart(symbol, range_, interval):
@@ -418,6 +531,10 @@ def analyse(item):
             "Spread / tick / slippage must be validated; action blocked."
         )
 
+    lines.append(
+        "PASS|Shariah Status|Verified|"
+        + f"{item.get('shariah_source','Verified')} • as of {item.get('shariah_asof','')}"
+    )
     if item.get("source") == "AUTO_DISCOVERY":
         lines.append("INFO|Discovery|Mode|Auto-discovered candidate")
     reason="\n".join(lines)
@@ -528,6 +645,10 @@ def main():
             existing.add(x["symbol"])
 
     print("Auto discovery:", "; ".join(discovery_notes))
+
+    items, shariah_notes = shariah_filter(items)
+    print("Shariah filter:", "; ".join(shariah_notes))
+
     ok=0
     failed=[]
     for item in items:
@@ -536,7 +657,7 @@ def main():
         except Exception as e:
             failed.append(item.get("symbol","?")); print("FAILED",item.get("symbol"),type(e).__name__,e)
     status="CURRENT" if ok==len(items) else "PARTIAL" if ok else "ERROR"
-    health(status,f"{ok}/{len(items)} symbols scanned; auto-discovery ON. Source={SOURCE}; unofficial/best-effort, not guaranteed real-time." + (" Failed: "+",".join(failed) if failed else ""))
+    health(status,f"{ok}/{len(items)} Shariah-verified symbols scanned; Shariah-only ON; auto-discovery ON. Source={SOURCE}; unofficial/best-effort price data." + (" Failed: "+",".join(failed) if failed else ""))
     if ok==0:raise RuntimeError("all symbols failed")
     update_positions()
     print(f"Equity scan complete: {ok}/{len(items)}")
