@@ -8,6 +8,10 @@ D1_URL = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/d1/databas
 UNIVERSE = Path(__file__).with_name("universe.json")
 UA = "Mozilla/5.0 V10-Investment-Scanner/1.0"
 SOURCE = "YAHOO_PUBLIC_CHART_UNOFFICIAL"
+DISCOVERY_ENABLED = True
+DISCOVERY_PER_MARKET = 20
+DISCOVERY_PICK_PER_MARKET = 8
+
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -19,6 +23,93 @@ def get_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept":"application/json"})
     with urllib.request.urlopen(req, timeout=35) as r:
         return json.loads(r.read().decode())
+
+
+def _raw(v, default=None):
+    if isinstance(v, dict):
+        if v.get("raw") is not None:
+            return v.get("raw")
+        if v.get("fmt") is not None:
+            return v.get("fmt")
+    return v if v is not None else default
+
+def discover_market(market):
+    """Best-effort dynamic discovery from Yahoo public screener endpoints."""
+    region = {"MY":"MY","US":"US","HK":"HK"}[market]
+    found = {}
+    errors = []
+
+    for screener in ("most_actives","day_gainers"):
+        qs = urllib.parse.urlencode({
+            "count": DISCOVERY_PER_MARKET,
+            "scrIds": screener,
+            "region": region,
+            "lang": "en-US"
+        })
+        url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?" + qs
+        try:
+            data = get_json(url)
+            result = ((data.get("finance") or {}).get("result") or [])
+            quotes = result[0].get("quotes", []) if result else []
+
+            for q in quotes:
+                symbol = str(q.get("symbol") or "").upper().strip()
+                if not symbol:
+                    continue
+
+                # Region sanity filters.
+                if market == "MY" and not symbol.endswith(".KL"):
+                    continue
+                if market == "HK" and not symbol.endswith(".HK"):
+                    continue
+                if market == "US" and (symbol.endswith(".KL") or symbol.endswith(".HK")):
+                    continue
+
+                try:
+                    price = float(_raw(q.get("regularMarketPrice"), 0) or 0)
+                    volume = float(_raw(q.get("regularMarketVolume"), 0) or 0)
+                except Exception:
+                    continue
+
+                if price <= 0 or volume <= 0:
+                    continue
+
+                # Broad discovery guards only. The real engine still validates later.
+                if market == "MY" and not (0.10 <= price <= 50):
+                    continue
+                if market == "US" and not (1.00 <= price <= 1500):
+                    continue
+                if market == "HK" and not (0.50 <= price <= 2500):
+                    continue
+
+                found[symbol] = {
+                    "market": market,
+                    "symbol": symbol,
+                    "name": str(q.get("shortName") or q.get("longName") or symbol)[:80],
+                    "turnover_proxy": price * volume
+                }
+        except Exception as e:
+            errors.append(type(e).__name__)
+
+    rows = list(found.values())
+    rows.sort(key=lambda x: x["turnover_proxy"], reverse=True)
+    return rows[:DISCOVERY_PICK_PER_MARKET], errors
+
+def discover_candidates():
+    if not DISCOVERY_ENABLED:
+        return [], ["disabled"]
+
+    out = []
+    notes = []
+
+    for market in ("MY","US","HK"):
+        rows, errors = discover_market(market)
+        out.extend(rows)
+        notes.append(f"{market}:{len(rows)}")
+        if errors:
+            notes.append(f"{market}_err:{','.join(errors[:2])}")
+
+    return out, notes
 
 def chart(symbol, range_, interval):
     qs = urllib.parse.urlencode({"range":range_,"interval":interval,"includePrePost":"false","events":"div,splits"})
@@ -327,6 +418,8 @@ def analyse(item):
             "Spread / tick / slippage must be validated; action blocked."
         )
 
+    if item.get("source") == "AUTO_DISCOVERY":
+        lines.append("INFO|Discovery|Mode|Auto-discovered candidate")
     reason="\n".join(lines)
     return {"market":item["market"],"symbol":item["symbol"],"name":item.get("name",item["symbol"]),"price":str(round(price,6)),"action":action,"grade":grade,"safety":safety,"score":str(int(round(sc))),"validation":validation,"rr":str(round(rr,2)),"reason":reason[:1800],"price_ts":ts_iso(pts),"signal_ts":now_iso(),"data_status":"UNOFFICIAL_BEST_EFFORT","updated":now_iso()}
 
@@ -419,14 +512,31 @@ def update_positions():
     position_health(status,note)
 
 def main():
-    cfg=json.loads(UNIVERSE.read_text()); items=cfg.get("symbols",[]); ok=0; failed=[]
+    cfg=json.loads(UNIVERSE.read_text())
+    items=list(cfg.get("symbols",[]))
+
+    discovered, discovery_notes = discover_candidates()
+    existing={str(x.get("symbol") or "").upper() for x in items}
+    for x in discovered:
+        if x["symbol"] not in existing:
+            items.append({
+                "market":x["market"],
+                "symbol":x["symbol"],
+                "name":x["name"],
+                "source":"AUTO_DISCOVERY"
+            })
+            existing.add(x["symbol"])
+
+    print("Auto discovery:", "; ".join(discovery_notes))
+    ok=0
+    failed=[]
     for item in items:
         try:
             x=analyse(item); upsert(x); ok+=1; print(item["symbol"],x["score"],x["action"])
         except Exception as e:
             failed.append(item.get("symbol","?")); print("FAILED",item.get("symbol"),type(e).__name__,e)
     status="CURRENT" if ok==len(items) else "PARTIAL" if ok else "ERROR"
-    health(status,f"{ok}/{len(items)} symbols scanned. Source={SOURCE}; unofficial/best-effort, not guaranteed real-time." + (" Failed: "+",".join(failed) if failed else ""))
+    health(status,f"{ok}/{len(items)} symbols scanned; auto-discovery ON. Source={SOURCE}; unofficial/best-effort, not guaranteed real-time." + (" Failed: "+",".join(failed) if failed else ""))
     if ok==0:raise RuntimeError("all symbols failed")
     update_positions()
     print(f"Equity scan complete: {ok}/{len(items)}")
