@@ -712,8 +712,17 @@ def main():
             failed.append(item.get("symbol","?")); print("FAILED",item.get("symbol"),type(e).__name__,e)
     status="CURRENT" if ok==len(items) else "PARTIAL" if ok else "ERROR"
     health(status,f"{ok}/{len(items)} Shariah-verified symbols scanned; Shariah-only ON; auto-discovery ON. Source={SOURCE}; unofficial/best-effort price data." + (" Failed: "+",".join(failed) if failed else ""))
-    if ok==0:raise RuntimeError("all symbols failed")
-    update_positions()
+
+    # Position refresh is independent from BUY IDEAS/equity scan.
+    # Even if the equity scan has no successful symbols, saved positions still refresh.
+    try:
+        update_positions()
+    except Exception as e:
+        position_health("ERROR",f"Position refresh error: {type(e).__name__}")
+        print("POSITION MANAGER ERROR",type(e).__name__,e)
+
+    if ok==0:
+        print("WARNING: equity scan returned zero successful symbols; position refresh was still attempted.")
     print(f"Equity scan complete: {ok}/{len(items)}")
 
 if __name__=="__main__":main()
