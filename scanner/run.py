@@ -555,7 +555,7 @@ def luno_ticker(pair):
         raise RuntimeError("Luno market inactive")
 
     px = float(data.get("last_trade") or 0)
-    if px <= 0:
+    if not sane_price(px):
         raise RuntimeError("invalid Luno ticker price")
 
     ts_ms = int(data.get("timestamp") or 0)
@@ -569,6 +569,15 @@ def luno_ticker(pair):
         "volume_24h": float(data.get("rolling_24_hour_volume") or 0),
         "ts": ts_sec
     }
+
+
+
+def sane_price(v):
+    try:
+        x=float(v)
+        return math.isfinite(x) and x>0
+    except Exception:
+        return False
 
 
 def normalise_position_symbol(market,symbol):
@@ -608,7 +617,7 @@ def position_action(avg,current,I,i):
 def update_positions():
     rows=d1_rows("""SELECT platform,market,symbol,quantity,avg_buy FROM positions ORDER BY platform,market,symbol""")
     if not rows:
-        position_health("CURRENT","No saved positions.")
+        position_health("CURRENT","No saved positions. Position Manager healthy.")
         print("Position Manager: no positions")
         return
 
