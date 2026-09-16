@@ -1,4 +1,4 @@
-name: V10 Private Heavy Validation Scanner
+name: V10.5 Equity Signal Scanner
 
 on:
   workflow_dispatch:
@@ -8,21 +8,17 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
-
+    timeout-minutes: 5
     permissions:
       contents: read
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Run private scanner
+      - name: Run V10.5 equity scanner
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
