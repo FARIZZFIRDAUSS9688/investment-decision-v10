@@ -165,9 +165,19 @@ def d1(sql,params):
     req=urllib.request.Request(D1_URL,data=payload,headers={"Authorization":f"Bearer {API_TOKEN}","Content-Type":"application/json","Accept":"application/json","User-Agent":UA},method="POST")
     with urllib.request.urlopen(req,timeout=45) as r: body=json.loads(r.read().decode())
     if not body.get("success"):raise RuntimeError("D1 success=false")
+    return body
+
+def d1_rows(sql,params=None):
+    body=d1(sql,params or [])
+    result=body.get("result") or []
+    return (result[0].get("results") or []) if result else []
 
 def health(status,note):
     d1("""INSERT INTO health(source,status,updated_at,note) VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at,note=excluded.note""",["Equity Signal Scanner",status,now_iso(),note])
+
+def position_health(status,note):
+    d1("""INSERT INTO health(source,status,updated_at,note) VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at,note=excluded.note""",["Position Manager",status,now_iso(),note])
+
 
 def upsert(x):
     d1("""INSERT INTO buy_ideas(market,symbol,name,price,action,setup_grade,safety_status,technical_score,validation_status,rr,reason,price_updated_at,signal_updated_at,data_status,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(market,symbol) DO UPDATE SET name=excluded.name,price=excluded.price,action=excluded.action,setup_grade=excluded.setup_grade,safety_status=excluded.safety_status,technical_score=excluded.technical_score,validation_status=excluded.validation_status,rr=excluded.rr,reason=excluded.reason,price_updated_at=excluded.price_updated_at,signal_updated_at=excluded.signal_updated_at,data_status=excluded.data_status,updated_at=excluded.updated_at""",[x[k] for k in ("market","symbol","name","price","action","grade","safety","score","validation","rr","reason","price_ts","signal_ts","data_status","updated")])
@@ -320,6 +330,94 @@ def analyse(item):
     reason="\n".join(lines)
     return {"market":item["market"],"symbol":item["symbol"],"name":item.get("name",item["symbol"]),"price":str(round(price,6)),"action":action,"grade":grade,"safety":safety,"score":str(int(round(sc))),"validation":validation,"rr":str(round(rr,2)),"reason":reason[:1800],"price_ts":ts_iso(pts),"signal_ts":now_iso(),"data_status":"UNOFFICIAL_BEST_EFFORT","updated":now_iso()}
 
+
+def normalise_position_symbol(market,symbol):
+    m=str(market or "").upper().strip()
+    s=str(symbol or "").upper().strip()
+    if m=="MY" and not s.endswith(".KL"):
+        if s.isdigit(): s=s+".KL"
+    elif m=="HK" and not s.endswith(".HK"):
+        if s.isdigit(): s=s.zfill(4)+".HK"
+    return s
+
+def position_action(avg,current,I,i):
+    if avg<=0 or current<=0:
+        return "WAIT - DATA","Missing valid price data."
+
+    pnl=(current/avg-1)*100
+    e20=I["e20"][i]
+    e50=I["e50"][i]
+    r=I["rsi"][i]
+    a=I["atr"][i]
+
+    if pnl<=-8:
+        return "EXIT WATCH - LOSING THESIS",f"P/L {pnl:.2f}% <= -8% risk-review threshold."
+    if current<e50 and pnl<0:
+        return "REDUCE / RISK REVIEW",f"Price below EMA50 while position is losing ({pnl:.2f}%)."
+    if pnl>=15 and current<e20:
+        return "EXIT CANDIDATE - PROTECT PROFIT",f"Profit {pnl:.2f}% but price fell below EMA20."
+    if pnl>=10:
+        trail=max(e20,current-2*a) if a else e20
+        return "TRAIL PROFIT / HOLD",f"Profit {pnl:.2f}%. Trail reference ~{trail:.4f}."
+    if pnl>=5 and r is not None and r>=70:
+        return "TAKE PARTIAL PROFIT REVIEW",f"Profit {pnl:.2f}% with RSI14 {r:.1f}."
+    if current>=e20 and e20>=e50:
+        return "HOLD - TREND OK",f"Price > EMA20 > EMA50. P/L {pnl:.2f}%."
+    return "HOLD / MONITOR",f"P/L {pnl:.2f}%. No major exit trigger."
+
+def update_positions():
+    rows=d1_rows("""SELECT platform,market,symbol,quantity,avg_buy FROM positions ORDER BY platform,market,symbol""")
+    if not rows:
+        position_health("CURRENT","No saved positions.")
+        print("Position Manager: no positions")
+        return
+
+    ok=0
+    failed=[]
+
+    for row in rows:
+        platform=row["platform"]; market=row["market"]; stored=row["symbol"]
+        try:
+            if str(market).upper()=="CRYPTO":
+                raise RuntimeError("Crypto position sync comes in next connector phase")
+
+            symbol=normalise_position_symbol(market,stored)
+            b=chart(symbol,"1y","1d")
+            if len(b)<210: raise RuntimeError("insufficient history")
+            I=indicators(b); i=len(b)-1
+
+            current=b[-1]["close"]; pts=b[-1]["ts"]
+            try:
+                intr=chart(symbol,"1d","5m")
+                if intr:
+                    current=intr[-1]["close"]; pts=intr[-1]["ts"]
+            except Exception:
+                pass
+
+            avg=float(row["avg_buy"] or 0)
+            pnl=(current/avg-1)*100 if avg>0 else 0
+            action,reason=position_action(avg,current,I,i)
+            now=now_iso()
+
+            d1("""UPDATE positions SET
+                current_price=?,pnl_pct=?,action=?,reason=?,
+                price_updated_at=?,signal_updated_at=?,
+                data_status='UNOFFICIAL_BEST_EFFORT',updated_at=?
+                WHERE platform=? AND market=? AND symbol=?""",
+                [str(round(current,6)),str(round(pnl,4)),action,reason,
+                 ts_iso(pts),now,now,platform,market,stored])
+
+            ok+=1
+            print(f"POSITION {market} {stored}: {action} P/L={pnl:.2f}%")
+        except Exception as e:
+            failed.append(stored)
+            print("POSITION FAILED",stored,type(e).__name__,e)
+
+    status="CURRENT" if ok==len(rows) else "PARTIAL" if ok else "ERROR"
+    note=f"{ok}/{len(rows)} positions refreshed."
+    if failed: note+=" Failed: "+",".join(failed[:10])
+    position_health(status,note)
+
 def main():
     cfg=json.loads(UNIVERSE.read_text()); items=cfg.get("symbols",[]); ok=0; failed=[]
     for item in items:
@@ -330,6 +428,7 @@ def main():
     status="CURRENT" if ok==len(items) else "PARTIAL" if ok else "ERROR"
     health(status,f"{ok}/{len(items)} symbols scanned. Source={SOURCE}; unofficial/best-effort, not guaranteed real-time." + (" Failed: "+",".join(failed) if failed else ""))
     if ok==0:raise RuntimeError("all symbols failed")
+    update_positions()
     print(f"Equity scan complete: {ok}/{len(items)}")
 
 if __name__=="__main__":main()
