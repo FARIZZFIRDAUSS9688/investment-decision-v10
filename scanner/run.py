@@ -184,7 +184,7 @@ def analyse(item):
         if intr:price=intr[-1]["close"];pts=intr[-1]["ts"]
     except Exception:pass
     px=daily[-1]["close"]; vavg=I["v20"][i] or 0; vr=daily[-1]["volume"]/vavg if vavg else 0; turnover=px*daily[-1]["volume"]
-    prelim=bt["trades"]>=15 and bt["pf"]>=1.2 and bt["exp"]>0
+    prelim=bt["trades"]>=30 and bt["pf"]>=1.2 and bt["exp"]>0
     low=item["market"]=="MY" and px<=1.0
     if low:
         safety="BLOCKED"; validation="NOT VALIDATED"; action="PAPER ONLY - LOW PRICE EXECUTION DATA"
@@ -195,7 +195,129 @@ def analyse(item):
     else:
         safety="BLOCKED"; validation="NO ACTIONABLE EDGE"; action="WATCH / WAIT"
     grade="A" if sc>=90 else "B" if sc>=80 else "C" if sc>=70 else "D"
-    reason=(f"Source={SOURCE}; technical score is NOT probability. EMA20={I['e20'][i]:.4f}, EMA50={I['e50'][i]:.4f}, EMA200={I['e200'][i]:.4f}; RSI14={I['rsi'][i]:.1f}; ATR14={I['atr'][i]:.4f}; VolRatio={vr:.2f}; Turnover~={turnover:.0f}; StopRef={stop:.4f}; TargetRef={target:.4f}; OOS trades={bt['trades']}, win={bt['win']:.1f}%, PF={bt['pf']:.2f}, Exp={bt['exp']:.2f}R, MaxDD={bt['dd']:.2f}R. " + ("Low-price MY blocked because spread/tick/slippage are not validated by this free source." if low else ""))
+    mac=I["mac"][i]
+    sig=I["sig"][i]
+    res=I["res"][i]
+    atr_pct=(I["atr"][i]/px*100) if px else 999
+
+    e20=I["e20"][i]
+    e50=I["e50"][i]
+    e200=I["e200"][i]
+    mac=I["mac"][i]
+    sig=I["sig"][i]
+    res=I["res"][i]
+    atr_pct=(I["atr"][i]/px*100) if px else 999
+
+    def pct_gap(a,b):
+        return ((a/b)-1)*100 if b else 0.0
+
+    breakout_pct=(px/res*100) if res else 0.0
+    mac_gap=(mac-sig) if mac is not None and sig is not None else None
+
+    tech_checks=[
+        (
+            "Price > EMA20",
+            px>e20,
+            "Price > EMA20",
+            f"{px:.4f} > {e20:.4f} ({pct_gap(px,e20):+.2f}%)"
+        ),
+        (
+            "EMA20 > EMA50",
+            e20>e50,
+            "EMA20 > EMA50",
+            f"{e20:.4f} > {e50:.4f} ({pct_gap(e20,e50):+.2f}%)"
+        ),
+        (
+            "EMA50 > EMA200",
+            e50>e200,
+            "EMA50 > EMA200",
+            f"{e50:.4f} > {e200:.4f} ({pct_gap(e50,e200):+.2f}%)"
+        ),
+        (
+            "RSI14",
+            50<=I["rsi"][i]<=70,
+            "50–70",
+            f"{I['rsi'][i]:.1f}"
+        ),
+        (
+            "MACD > Signal",
+            mac is not None and sig is not None and mac>sig,
+            "MACD > Signal",
+            f"{mac:.4f} > {sig:.4f} (Δ {mac_gap:+.4f})"
+            if mac is not None and sig is not None else "N/A"
+        ),
+        (
+            "MACD > 0",
+            mac is not None and mac>0,
+            "> 0",
+            f"{mac:.4f}" if mac is not None else "N/A"
+        ),
+        (
+            "Volume Ratio",
+            vr>=1.20,
+            "≥ 1.20x",
+            f"{vr:.2f}x"
+        ),
+        (
+            "20D Breakout",
+            res is not None and px>=res*0.995,
+            "Price ≥ 99.5% of 20D High",
+            f"{px:.4f} vs {res:.4f} ({breakout_pct:.2f}% of 20D High)"
+            if res else "N/A"
+        ),
+        (
+            "ATR%",
+            atr_pct<=5,
+            "≤ 5.00%",
+            f"{atr_pct:.2f}%"
+        ),
+        (
+            "R:R",
+            rr>=2.0,
+            "≥ 2.00",
+            f"{rr:.2f}"
+        )
+    ]
+    tech_pass=sum(1 for _,ok,_,_ in tech_checks if ok)
+
+    val_checks=[
+        ("OOS Sample", bt["trades"]>=30, "≥ 30 trades", f"{bt['trades']} trades"),
+        ("Win Rate", bt["win"]>=50, "≥ 50.0%", f"{bt['win']:.1f}%"),
+        ("Profit Factor", bt["pf"]>=1.20, "≥ 1.20", f"{bt['pf']:.2f}"),
+        ("Expectancy", bt["exp"]>0, "> 0R", f"{bt['exp']:+.2f}R")
+    ]
+    val_pass=sum(1 for _,ok,_,_ in val_checks if ok)
+
+    lines=[f"SUMMARY|Technical Study||{tech_pass}/10"]
+    for label,ok,standard,actual in tech_checks:
+        lines.append(
+            ("PASS" if ok else "FAIL")
+            +f"|{label}|{standard}|{actual}"
+        )
+
+    lines.append("SECTION|Validation Study||")
+    lines.append(f"SUMMARY|Validation Checks||{val_pass}/4")
+    for label,ok,standard,actual in val_checks:
+        lines.append(
+            ("PASS" if ok else "FAIL")
+            +f"|{label}|{standard}|{actual}"
+        )
+
+    lines += [
+        f"INFO|Max Drawdown|Value|{bt['dd']:.2f}R",
+        f"INFO|Turnover|Approx.|~{turnover:.0f}",
+        f"INFO|Stop Reference|Reference only|{stop:.4f}",
+        f"INFO|Target Reference|Reference only|{target:.4f}",
+        f"INFO|Data Source|Source|{SOURCE}",
+        "INFO|Reminder|Meaning|Technical score is NOT probability."
+    ]
+    if low:
+        lines.append(
+            "WARN|Low-price MY safety|Requirement|"
+            "Spread / tick / slippage must be validated; action blocked."
+        )
+
+    reason="\n".join(lines)
     return {"market":item["market"],"symbol":item["symbol"],"name":item.get("name",item["symbol"]),"price":str(round(price,6)),"action":action,"grade":grade,"safety":safety,"score":str(int(round(sc))),"validation":validation,"rr":str(round(rr,2)),"reason":reason[:1800],"price_ts":ts_iso(pts),"signal_ts":now_iso(),"data_status":"UNOFFICIAL_BEST_EFFORT","updated":now_iso()}
 
 def main():
