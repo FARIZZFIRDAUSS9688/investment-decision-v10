@@ -1,4 +1,4 @@
-name: V10.6 Equity + Position Manager
+name: V10.7 Auto Discovery + Position Manager
 
 on:
   workflow_dispatch:
@@ -8,17 +8,20 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     permissions:
       contents: read
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run V10.6 scanner
+
+      - name: Run V10.7 scanner
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
