@@ -1,4 +1,4 @@
-name: V10.8A Luno Position Fix
+name: V10.9 Final Daily Scan
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
       - name: Install PDF reader
         run: pip install pypdf
 
-      - name: Run V10.8A scanner
+      - name: Run V10.9 scanner
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
