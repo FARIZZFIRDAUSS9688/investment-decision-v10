@@ -541,6 +541,36 @@ def analyse(item):
     return {"market":item["market"],"symbol":item["symbol"],"name":item.get("name",item["symbol"]),"price":str(round(price,6)),"action":action,"grade":grade,"safety":safety,"score":str(int(round(sc))),"validation":validation,"rr":str(round(rr,2)),"reason":reason[:1800],"price_ts":ts_iso(pts),"signal_ts":now_iso(),"data_status":"UNOFFICIAL_BEST_EFFORT","updated":now_iso()}
 
 
+
+def luno_ticker(pair):
+    pair = str(pair or "").upper().strip()
+    if not pair:
+        raise RuntimeError("empty Luno pair")
+
+    qs = urllib.parse.urlencode({"pair": pair})
+    url = "https://api.luno.com/api/1/ticker?" + qs
+    data = get_json(url)
+
+    if str(data.get("status") or "").upper() not in ("ACTIVE","POST_ONLY","UNKNOWN",""):
+        raise RuntimeError("Luno market inactive")
+
+    px = float(data.get("last_trade") or 0)
+    if px <= 0:
+        raise RuntimeError("invalid Luno ticker price")
+
+    ts_ms = int(data.get("timestamp") or 0)
+    ts_sec = ts_ms / 1000 if ts_ms else datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+    return {
+        "pair": pair,
+        "price": px,
+        "bid": float(data.get("bid") or 0),
+        "ask": float(data.get("ask") or 0),
+        "volume_24h": float(data.get("rolling_24_hour_volume") or 0),
+        "ts": ts_sec
+    }
+
+
 def normalise_position_symbol(market,symbol):
     m=str(market or "").upper().strip()
     s=str(symbol or "").upper().strip()
@@ -589,7 +619,31 @@ def update_positions():
         platform=row["platform"]; market=row["market"]; stored=row["symbol"]
         try:
             if str(market).upper()=="CRYPTO":
-                raise RuntimeError("Crypto position sync comes in next connector phase")
+                t=luno_ticker(stored)
+                current=t["price"]
+                avg=float(row["avg_buy"] or 0)
+                pnl=(current/avg-1)*100 if avg>0 else 0
+                now=now_iso()
+
+                # Fail-closed: public ticker is enough for current P/L,
+                # but not enough for our technical exit engine.
+                action="MONITOR - TECHNICAL DATA NOT VERIFIED"
+                reason=(
+                    f"Luno public ticker only. Current P/L {pnl:.2f}%. "
+                    "No technical HOLD/SELL signal is generated without validated historical candles."
+                )
+
+                d1("""UPDATE positions SET
+                    current_price=?,pnl_pct=?,action=?,reason=?,
+                    price_updated_at=?,signal_updated_at=?,
+                    data_status='LUNO_PUBLIC_TICKER',updated_at=?
+                    WHERE platform=? AND market=? AND symbol=?""",
+                    [str(round(current,8)),str(round(pnl,4)),action,reason,
+                     ts_iso(t["ts"]),now,now,platform,market,stored])
+
+                ok+=1
+                print(f"POSITION CRYPTO {stored}: P/L={pnl:.2f}%")
+                continue
 
             symbol=normalise_position_symbol(market,stored)
             b=chart(symbol,"1y","1d")
